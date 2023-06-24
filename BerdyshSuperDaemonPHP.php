@@ -4,6 +4,7 @@
         const
             AddrListen      = 'AddrListen'  ,
             ModeListner     = 'ModeListner' ,
+            ModeClient      = 'ModeClient'  ,
             ModeLogger      = 'ModeLogger'  ,
             Mode            = 'Mode'        ;
 
@@ -38,6 +39,16 @@
             $this->CntNodes = 0 ;
         }
 
+        function GenClient(){
+            $this->CntNodes++ ;
+            $node = $this->Nodes[$this->CntNodes] = new BerdyshSuperDaemonPHP($this->P) ;
+            $node->Setter([self::Mode => self::ModeClient]) ;
+            $node->SOCK = FALSE ;
+            $node->RW_FLAGS = 0 ;
+            $node->ID = $this->CntNodes ;
+            return $node ;
+        }
+
         function GenListner(){
             $this->CntNodes++ ;
 
@@ -45,6 +56,7 @@
             $node->Setter([self::Mode => self::ModeListner]) ;
             $node->SOCK = FALSE ;
             $node->RW_FLAGS = 0 ;
+            $node->ID = $this->CntNodes ;
             return $node ;
         }
 
@@ -103,11 +115,38 @@
                     $this->P->Logger->debug('書込可') ;
                 }
                 if(($node->RW_FLAGS & 1) == 1){
-                    $this->P->Logger->debug('読込可') ;
-                    exit ;
+                    switch($node->Mode){
+                    case self::ModeListner:
+                        $this->P->Logger->debug('読込可[%s]',$node->Mode) ;
+
+                        $timeout = 0 ;
+                        $peer_name = FALSE ;
+
+                        if(($sock_new = stream_socket_accept($node->SOCK,$timeout,$peer_name)) !== FALSE){
+                            $node_new = $this->P->GenClient() ;
+                            $node_new->SOCK = $sock_new ;
+                        }
+
+                        break ;
+                    default:
+                        $this->P->Logger->debug('読込可[%s]',$node->Mode) ;
+
+                        if(feof($node->SOCK)){
+                            fclose($node->SOCK) ;
+                            $node->SOCK = FALSE ;
+                            unset($this->P->Nodes[$node->ID]) ;
+                            return ;
+                        }else{
+                            $buf = fread($node->SOCK,4096) ;
+                            $this->P->Logger->debug($buf) ;
+                        }
+                        break ;
+                    }
                 }
 
-                $this->RD_fds[] = $node->SOCK ;
+                if($node->SOCK !== FALSE){
+                    $this->RD_fds[] = $node->SOCK ;
+                }
             }
             $node->RW_FLAGS = 0 ;
         }
