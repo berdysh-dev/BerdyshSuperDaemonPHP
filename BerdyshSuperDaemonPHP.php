@@ -11,17 +11,27 @@
             Mode            = 'Mode'        ;
 
         const
-            RD              = 1 ,
-            WR              = 2 ,
-            SOCK            = 'SOCK'        ,
-            HTTP            = 'HTTP'        ,
-            FIFO            = 'FIFO'        ;
+            RD                  = 1 ,
+            WR                  = 2 ,
+            SOCK                = 'SOCK'                ,
+            HTTP                = 'HTTP'                ,
+            HTTP_HEAD           = 'HTTP_HEAD'           ,
+            HTTP_STEP           = 'HTTP_STEP'           ,
+            HTTP_STEP_HEAD      = 'HTTP_STEP_HEAD'      ,
+            HTTP_STEP_POST      = 'HTTP_STEP_POST'      ,
+            HTTP_STEP_POST_COMP = 'HTTP_STEP_POST_COMP' ,
+            HTTP_STEP_NO_POST   = 'HTTP_STEP_NO_POST'   ,
+
+            POST_RAW            = 'POST_RAW' ,
+            POST_CONTENT_LENGTH = 'POST_CONTENT_LENGTH' ,
+            POST_CONTENT_TYPE   = 'POST_CONTENT_TYPE' ,
+            FIFO                = 'FIFO'        ;
 
         const
             CLOSE_BY_WR     = 'CLOSE_BY_WR'     ,
             HTTP_VERSION    = 'HTTP_VERSION'    ,
             METHOD          = 'METHOD'          ,
-            PATH            = 'PATH'            ;
+            REQUEST_URI     = 'REQUEST_URI'     ;
 
         function Setter($params){
             foreach($params as $k => $v){
@@ -176,53 +186,112 @@
             }
         }
 
+        function NodeGenRes(&$Con){
+
+            $payload = '<pre>' . print_r($Con->HTTP,1) . '</pre>' ;
+            $payload .= '<pre>' . print_r($Con->HTTP_HEAD,1) . '</pre>' ;
+            $payload .= '<hr>' ;
+            $payload .= '<form method="POST" enctype="multipart/form-data">' ;
+            $payload .= '<input type="test" name="hoge" value="hoge">' ;
+            $payload .= '<input type="submit" name="submit" value="フォーム送信">' ;
+            $payload .= '</form>' ;
+
+            $payload .= '<form method="POST" enctype="application/x-www-form-urlencoded">' ;
+            $payload .= '<input type="test" name="hoge" value="hoge">' ;
+            $payload .= '<input type="submit" name="submit" value="フォーム送信">' ;
+            $payload .= '</form>' ;
+
+            $payload .= '<form method="GET">' ;
+            $payload .= '<input type="test" name="hoge" value="hoge">' ;
+            $payload .= '<input type="submit" name="submit" value="GET送信">' ;
+            $payload .= '</form>' ;
+
+            $len = strlen($payload) ;
+
+            $Con->FIFO[self::WR] = "" ;
+            $Con->FIFO[self::WR] .= $Con->HTTP[self::HTTP_VERSION] . " 200 OK\r\n" ;
+            $Con->FIFO[self::WR] .= "Content-Type: text/html; charset=utf8\r\n" ;
+            $Con->FIFO[self::WR] .= sprintf("Content-Length: %d\r\n",$len) ;
+            $Con->FIFO[self::WR] .= "\r\n" ;
+            $Con->FIFO[self::WR] .= $payload ;
+
+                        $Con->CLOSE_BY_WR = 1 ;
+        }
+
         function NodeEvRecvCon(&$Con){
 
             if(property_exists($Con,self::HTTP) === FALSE){ $Con->HTTP = [] ; }
+            if(property_exists($Con,self::HTTP_HEAD) === FALSE){ $Con->HTTP_HEAD = [] ; }
+            if(property_exists($Con,self::HTTP_STEP) === FALSE){ $Con->HTTP_STEP = self::HTTP_STEP_HEAD ; }
 
+retry:
             for(;;){
-                if(($pos = strpos($Con->FIFO[self::RD],chr(0x0a))) !== FALSE){
-                    $line = substr($Con->FIFO[self::RD],0,$pos+1) ;
-                    $line = trim($line) ;
-                    $Con->FIFO[self::RD] = substr($Con->FIFO[self::RD],$pos+1) ;
+                if($Con->HTTP_STEP === self::HTTP_STEP_POST){
+                    if(strlen($Con->FIFO[self::RD]) >= $Con->HTTP[self::POST_CONTENT_LENGTH]){
+                        $Con->HTTP_STEP = self::HTTP_STEP_POST_COMP ;
 
-                    if(preg_match('/^([^:]+)\s*\:\s*(.*)$/',$line,$matches) === 1){
-                        $k = strtolower(trim($matches[1])) ;
-                        $v = trim($matches[2]) ;
-                        $Con->HTTP[$k] = $v ;
-                    }else if(preg_match('/^([^\s]+)\s+([^\s]+)\s+([^\s]+)$/',$line,$matches) === 1){
-                        // $this->P->Logger->debug('[%s][%s][%s]',$matches[1],$matches[2],$matches[3]) ;
-                        $Con->HTTP[self::METHOD]        = $matches[1] ;
-                        $Con->HTTP[self::PATH]          = $matches[2] ;
-                        $Con->HTTP[self::HTTP_VERSION]  = $matches[3] ;
-                    }else if($line === ''){
-                        ;
-                    }else{
-                        $this->P->Logger->debug('[%s]',$line) ;
-                    }
+                        $Con->HTTP[self::POST_RAW] = substr($Con->FIFO[self::RD],0,$Con->HTTP[self::POST_CONTENT_LENGTH]) ;
 
-                    if($line === ''){
-                        // $this->P->Logger->debug($Con->HTTP) ;
+                        $Con->FIFO[self::RD] = substr($Con->FIFO[self::RD],$Con->HTTP[self::POST_CONTENT_LENGTH]) ;
 
-                        $payload = '<pre>' . print_r($Con->HTTP,1) . '</pre>' ;
-                        $payload .= '<hr>' ;
-
-                        $len = strlen($payload) ;
-
-                        $Con->FIFO[self::WR] = "" ;
-                        $Con->FIFO[self::WR] .= $Con->HTTP[self::HTTP_VERSION] . " 200 OK\r\n" ;
-                        $Con->FIFO[self::WR] .= "Content-Type: text/html\r\n" ;
-                        $Con->FIFO[self::WR] .= sprintf("Content-Length: %d\r\n",$len) ;
-                        $Con->FIFO[self::WR] .= "\r\n" ;
-                        $Con->FIFO[self::WR] .= $payload ;
-
-                        $Con->CLOSE_BY_WR = 1 ;
+                        if(($len = strlen($Con->FIFO[self::RD])) != 0){
+                            $this->P->Logger->debug('残骸[%s]',$Con->FIFO[self::RD]) ;
+                        }
 
                         break ;
                     }
-                }else{
+                }else if($Con->HTTP_STEP === self::HTTP_STEP_NO_POST){
                     break ;
+                }else if($Con->HTTP_STEP === self::HTTP_STEP_HEAD){
+                    if(($pos = strpos($Con->FIFO[self::RD],chr(0x0a))) !== FALSE){
+                        $line = substr($Con->FIFO[self::RD],0,$pos+1) ;
+                        $line = trim($line) ;
+                        $Con->FIFO[self::RD] = substr($Con->FIFO[self::RD],$pos+1) ;
+
+                        if(preg_match('/^([^:]+)\s*\:\s*(.*)$/',$line,$matches) === 1){
+                            $k = strtolower(trim($matches[1])) ;
+                            $v = trim($matches[2]) ;
+
+                            switch($k){
+                            case 'content-type':
+                                $Con->HTTP[self::POST_CONTENT_TYPE]  = $v ;
+                                break ;
+                            case 'content-length':
+                                $Con->HTTP[self::POST_CONTENT_LENGTH]  = $v ;
+                                break ;
+                            default:
+                                $Con->HTTP_HEAD[$k] = $v ;
+                                break ;
+                            }
+
+                        }else if(preg_match('/^([^\s]+)\s+([^\s]+)\s+([^\s]+)$/',$line,$matches) === 1){
+                            // $this->P->Logger->debug('[%s][%s][%s]',$matches[1],$matches[2],$matches[3]) ;
+                            $Con->HTTP[self::METHOD]        = $matches[1] ;
+                            $Con->HTTP[self::REQUEST_URI]   = $matches[2] ;
+                            $Con->HTTP[self::HTTP_VERSION]  = $matches[3] ;
+                        }else if($line === ''){
+                            if(
+                                array_key_exists(self::POST_CONTENT_TYPE,$Con->HTTP) ||
+                                array_key_exists(self::POST_CONTENT_LENGTH,$Con->HTTP)
+                            ){
+                                $Con->HTTP_STEP = self::HTTP_STEP_POST ;
+                            }else{
+                                $Con->HTTP_STEP = self::HTTP_STEP_NO_POST ;
+                            }
+                            goto retry ;
+                        }else{
+                            $this->P->Logger->debug('[%s]',$line) ;
+                        }
+                    }else{
+                        break ;
+                    }
                 }
+            }
+            if(
+                ($Con->HTTP_STEP === self::HTTP_STEP_NO_POST) ||
+                ($Con->HTTP_STEP === self::HTTP_STEP_POST_COMP)
+            ){
+                $this->NodeGenRes($Con) ;
             }
         }
 
