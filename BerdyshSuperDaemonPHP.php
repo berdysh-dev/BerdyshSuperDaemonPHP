@@ -3,13 +3,18 @@
 
         const
             AddrListen      = 'AddrListen'  ,
-            ModeListner     = 'ModeListner' ,
+            ModeNode        = 'ModeNode'    ,
+            ModeMaster      = 'ModeMaster'  ,
+            ModeListen      = 'ModeListen'  ,
             ModeClient      = 'ModeClient'  ,
             ModeLogger      = 'ModeLogger'  ,
             Mode            = 'Mode'        ;
 
         const
-            SOCK            = 'SOCK'        ;
+            RD              = 1 ,
+            WR              = 2 ,
+            SOCK            = 'SOCK'        ,
+            FIFO            = 'FIFO'        ;
 
         function Setter($params){
             foreach($params as $k => $v){
@@ -34,30 +39,35 @@
             $this->Logger = new BerdyshSuperDaemonPHP($this) ;
             $this->Logger->Setter([self::Mode => self::ModeLogger]) ;
 
+            $this->Mode = self::ModeMaster ;
             $this->Nodes = [] ;
-
             $this->CntNodes = 0 ;
         }
 
-        function GenClient(){
-            $this->CntNodes++ ;
-            $node = $this->Nodes[$this->CntNodes] = new BerdyshSuperDaemonPHP($this->P) ;
-            $node->Setter([self::Mode => self::ModeClient]) ;
-            $node->SOCK = FALSE ;
-            $node->RW_FLAGS = 0 ;
-            $node->ID = $this->CntNodes ;
-            return $node ;
+        function GenNode(){
+            if($this->Mode === self::ModeMaster){
+                $this->CntNodes++ ;
+                $Node = $this->Nodes[$this->CntNodes] = new BerdyshSuperDaemonPHP($this->P) ;
+                $Node->NodeId = $this->CntNodes ;
+                $Node->Mode = self::ModeNode ;
+                $Node->Cons = [] ;
+                $Node->CntCons = 0 ;
+                return $Node ;
+            }
+            return FALSE ;
         }
 
-        function GenListner(){
-            $this->CntNodes++ ;
+        function GenCon(){
+            if($this->Mode === self::ModeNode){
+                $this->CntCons += 1 ;
+                $Con = $this->Cons[$this->CntCons] = new BerdyshSuperDaemonPHP($this->P) ;
 
-            $node = $this->Nodes[$this->CntNodes] = new BerdyshSuperDaemonPHP($this->P) ;
-            $node->Setter([self::Mode => self::ModeListner]) ;
-            $node->SOCK = FALSE ;
-            $node->RW_FLAGS = 0 ;
-            $node->ID = $this->CntNodes ;
-            return $node ;
+                $Con->NodeId = $this->NodeId ;
+                $Con->ConId  = $this->CntCons ;
+
+                return $Con ;
+            }
+            return FALSE ;
         }
 
         function debug(){
@@ -99,56 +109,104 @@
             sleep(1) ;
         }
 
-        function ProcNode(&$node){
+        function ProcNodeConPoll(&$Con){
 
-            if($node->SOCK === FALSE){
-                $this->P->Logger->debug($node->AddrListen) ;
+            if(property_exists($Con,self::SOCK) === FALSE){ $Con->SOCK = FALSE ; }
+
+            if($Con->SOCK === FALSE){
                 $errno = $errstr = FALSE ;
-                if(($node->SOCK = @stream_socket_server($node->AddrListen,$errno,$errstr)) === FALSE){
-                    $this->P->Logger->debug('[%s][%s][%s]',$node->AddrListen,$errno,$errstr) ;
+                if(($Con->SOCK = @stream_socket_server($Con->AddrListen,$errno,$errstr)) === FALSE){
+                    $this->P->Logger->debug('ERR:[%s][%s][%s]',$Con->AddrListen,$errno,$errstr) ;
+                }else{
+                    $this->P->Logger->debug('OK:[%s]',$Con->AddrListen) ;
                 }
             }
 
-            if($node->SOCK !== FALSE){
-
-                if(($node->RW_FLAGS & 2) == 2){
-                    $this->P->Logger->debug('書込可') ;
+            if($Con->SOCK !== FALSE){
+                if($Con->SOCK !== FALSE){
+                    $this->P->RD_fds[] = $Con->SOCK ;
                 }
-                if(($node->RW_FLAGS & 1) == 1){
-                    switch($node->Mode){
-                    case self::ModeListner:
-                        $this->P->Logger->debug('読込可[%s]',$node->Mode) ;
+            }
 
-                        $timeout = 0 ;
-                        $peer_name = FALSE ;
+            $Con->RW_FLAGS = 0 ;
+        }
 
-                        if(($sock_new = stream_socket_accept($node->SOCK,$timeout,$peer_name)) !== FALSE){
-                            $node_new = $this->P->GenClient() ;
-                            $node_new->SOCK = $sock_new ;
-                        }
+        function ProcNodeConPollAfter(&$Con,$RD_fds,$WR_fds,$EX_fds){
+            $Con->RW_FLAGS = 0 ;
 
-                        break ;
-                    default:
-                        $this->P->Logger->debug('読込可[%s]',$node->Mode) ;
+            if(is_array($RD_fds)){
+                foreach($RD_fds as $fd){
+                    if($fd === $Con->SOCK){ $Con->RW_FLAGS |= self::RD ; }
+                }
+            }
+            if(is_array($WR_fds)){
+                foreach($WR_fds as $fd){
+                    if($fd === $Con->SOCK){ $Con->RW_FLAGS |= self::WR ; }
+                }
+            }
+            if($Con->RW_FLAGS != 0){
+                $this->P->ProcNodeEventCon($Con) ;
+            }
+        }
 
-                        if(feof($node->SOCK)){
-                            fclose($node->SOCK) ;
-                            $node->SOCK = FALSE ;
-                            unset($this->P->Nodes[$node->ID]) ;
-                            return ;
+        function ProcNodePoll(&$Node){
+            foreach(array_keys($Node->Cons) as $ConId){
+                $this->ProcNodeConPoll($Node->Cons[$ConId]) ;
+            }
+        }
+
+        function ProcNodePollAfter(&$Node,$RD_fds,$WR_fds,$EX_fds){
+            foreach(array_keys($Node->Cons) as $ConId){
+                $this->ProcNodeConPollAfter($Node->Cons[$ConId],$RD_fds,$WR_fds,$EX_fds) ;
+            }
+        }
+
+        function ProcNodeEventCon(&$Con){
+
+            if(feof($Con->SOCK)){
+                fclose($Con->SOCK) ;
+                $Con->SOCK = FALSE ;
+                unset($this->P->Nodes[$Con->NodeId]->Cons[$Con->ConId]) ;
+                return ;
+            }
+
+            if(($Con->RW_FLAGS & self::WR) == self::WR){
+                $this->P->Logger->debug('書込可') ;
+            }
+
+            if(($Con->RW_FLAGS & self::RD) == self::RD){
+                switch($Con->Mode){
+                case self::ModeListen:
+                    $this->P->Logger->debug('受信可[%s]',$Con->Mode) ;
+                    $timeout = 0 ;
+                    $peer_name = FALSE ;
+                    if(($sock_new = stream_socket_accept($Con->SOCK,$timeout,$peer_name)) !== FALSE){
+                        if($NewNode = $this->P->GenNode()){
+                            if($NewCon = $NewNode->GenCon()){
+                                $NewCon->SOCK = $sock_new ;
+                                $NewCon->Setter([self::Mode => self::ModeClient]) ;
+                            }else{
+                                $this->P->Logger->debug('ALERT') ;
+                            }
                         }else{
-                            $buf = fread($node->SOCK,4096) ;
-                            $this->P->Logger->debug($buf) ;
+                            $this->P->Logger->debug('ALERT') ;
                         }
-                        break ;
                     }
-                }
-
-                if($node->SOCK !== FALSE){
-                    $this->RD_fds[] = $node->SOCK ;
+                    break ;
+                case self::ModeClient:
+                    $this->P->Logger->debug('読込可[%s]',$Con->Mode) ;
+                    $buf = fread($Con->SOCK,4096) ;
+                    $this->P->Logger->debug($buf) ;
+                    break ;
+                default:
+                    $this->P->Logger->debug('ALERT') ;
+                    exit ;
+                    break ;
                 }
             }
-            $node->RW_FLAGS = 0 ;
+        }
+
+        function Tick(){
         }
 
         function Proc(){
@@ -156,53 +214,54 @@
             $this->RD_fds = [] ;
             $this->WR_fds = [] ;
 
-            $keys = array_keys($this->Nodes) ;
+            $NodeIds = array_keys($this->Nodes) ;
 
-            foreach($keys as $idx){
-                $this->ProcNode($this->Nodes[$idx]) ;
+            foreach($NodeIds as $NodeId){
+                $this->ProcNodePoll($this->Nodes[$NodeId]) ;
             }
 
             if(! $this->RD_fds){ $this->RD_fds = NULL ; }
             if(! $this->WR_fds){ $this->WR_fds = NULL ; }
 
+            $seconds = 0 ; $microseconds = 100000 ;
+
             if($this->RD_fds || $this->WR_fds){
-                $seconds = 1 ; $microseconds = null ;
                 $this->EX_fds = NULL ;
                 $rc = stream_select($this->RD_fds,$this->WR_fds,$this->EX_fds,$seconds,$microseconds) ;
-                $this->P->Logger->debug('CNT[%d]',$rc) ;
-
                 if($rc > 0){
-                    foreach($keys as $idx){
-                        if(is_array($this->WR_fds)){
-                            foreach($this->WR_fds as $fd){
-                                if($this->Nodes[$idx]->SOCK === $fd){
-                                    $this->Nodes[$idx]->RW_FLAGS |= 2 ;
-                                }
-                            }
-                        }
-                        if(is_array($this->RD_fds)){
-                            foreach($this->RD_fds as $fd){
-                                if($this->Nodes[$idx]->SOCK === $fd){
-                                    $this->Nodes[$idx]->RW_FLAGS |= 1 ;
-                                }
-                            }
-                        }
+                    foreach($NodeIds as $NodeId){
+                        $this->ProcNodePollAfter($this->Nodes[$NodeId],$this->RD_fds,$this->WR_fds,$this->EX_fds) ;
                     }
                 }
             }else{
-                sleep(1) ;
+                usleep($microseconds) ;
             }
         }
     }
 
     if($Master = new BerdyshSuperDaemonPHP()){
-
-        if($Listner = $Master->GenListner()){
-            $Listner->Setter([BerdyshSuperDaemonPHP::AddrListen => 'tcp://0.0.0.0:8080']) ;
+        if($Node = $Master->GenNode()){
+            if($Con = $Node->GenCon()){
+                $Con->Setter([
+                    BerdyshSuperDaemonPHP::Mode => BerdyshSuperDaemonPHP::ModeListen,
+                    BerdyshSuperDaemonPHP::AddrListen => 'tcp://0.0.0.0:8080'
+                ]) ;
+            }
+            if($Con = $Node->GenCon()){
+                $Con->Setter([
+                    BerdyshSuperDaemonPHP::Mode => BerdyshSuperDaemonPHP::ModeListen,
+                    BerdyshSuperDaemonPHP::AddrListen => 'tcp://0.0.0.0:8081'
+                ]) ;
+            }
         }
-
+        $Master->TM = time() ;
         for(;;){
             $Master->Proc() ;
+            $t = time() ;
+            if($Master->TM !== $t){
+                $Master->Tick() ;
+                $Master->TM = $t ;
+            }
         }
     }
 
