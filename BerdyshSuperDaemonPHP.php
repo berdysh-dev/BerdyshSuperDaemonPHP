@@ -14,7 +14,14 @@
             RD              = 1 ,
             WR              = 2 ,
             SOCK            = 'SOCK'        ,
+            HTTP            = 'HTTP'        ,
             FIFO            = 'FIFO'        ;
+
+        const
+            CLOSE_BY_WR     = 'CLOSE_BY_WR'     ,
+            HTTP_VERSION    = 'HTTP_VERSION'    ,
+            METHOD          = 'METHOD'          ,
+            PATH            = 'PATH'            ;
 
         function Setter($params){
             foreach($params as $k => $v){
@@ -128,6 +135,14 @@
                 }
             }
 
+            if(property_exists($Con,self::FIFO)){
+                if(array_key_exists(self::WR,$Con->FIFO)){
+                    if($Con->FIFO[self::WR] !== ''){
+                        $this->P->WR_fds[] = $Con->SOCK ;
+                    }
+                }
+            }
+
             $Con->RW_FLAGS = 0 ;
         }
 
@@ -145,7 +160,7 @@
                 }
             }
             if($Con->RW_FLAGS != 0){
-                $this->P->ProcNodeEventCon($Con) ;
+                $this->ProcNodeEventCon($Con) ;
             }
         }
 
@@ -157,27 +172,109 @@
 
         function ProcNodePollAfter(&$Node,$RD_fds,$WR_fds,$EX_fds){
             foreach(array_keys($Node->Cons) as $ConId){
-                $this->ProcNodeConPollAfter($Node->Cons[$ConId],$RD_fds,$WR_fds,$EX_fds) ;
+                $Node->ProcNodeConPollAfter($Node->Cons[$ConId],$RD_fds,$WR_fds,$EX_fds) ;
+            }
+        }
+
+        function NodeEvRecvCon(&$Con){
+
+            if(property_exists($Con,self::HTTP) === FALSE){ $Con->HTTP = [] ; }
+
+            for(;;){
+                if(($pos = strpos($Con->FIFO[self::RD],chr(0x0a))) !== FALSE){
+                    $line = substr($Con->FIFO[self::RD],0,$pos+1) ;
+                    $line = trim($line) ;
+                    $Con->FIFO[self::RD] = substr($Con->FIFO[self::RD],$pos+1) ;
+
+                    if(preg_match('/^([^:]+)\s*\:\s*(.*)$/',$line,$matches) === 1){
+                        $k = strtolower(trim($matches[1])) ;
+                        $v = trim($matches[2]) ;
+                        $Con->HTTP[$k] = $v ;
+                    }else if(preg_match('/^([^\s]+)\s+([^\s]+)\s+([^\s]+)$/',$line,$matches) === 1){
+                        // $this->P->Logger->debug('[%s][%s][%s]',$matches[1],$matches[2],$matches[3]) ;
+                        $Con->HTTP[self::METHOD]        = $matches[1] ;
+                        $Con->HTTP[self::PATH]          = $matches[2] ;
+                        $Con->HTTP[self::HTTP_VERSION]  = $matches[3] ;
+                    }else if($line === ''){
+                        ;
+                    }else{
+                        $this->P->Logger->debug('[%s]',$line) ;
+                    }
+
+                    if($line === ''){
+                        // $this->P->Logger->debug($Con->HTTP) ;
+
+                        $payload = '<pre>' . print_r($Con->HTTP,1) . '</pre>' ;
+                        $payload .= '<hr>' ;
+
+                        $len = strlen($payload) ;
+
+                        $Con->FIFO[self::WR] = "" ;
+                        $Con->FIFO[self::WR] .= $Con->HTTP[self::HTTP_VERSION] . " 200 OK\r\n" ;
+                        $Con->FIFO[self::WR] .= "Content-Type: text/html\r\n" ;
+                        $Con->FIFO[self::WR] .= sprintf("Content-Length: %d\r\n",$len) ;
+                        $Con->FIFO[self::WR] .= "\r\n" ;
+                        $Con->FIFO[self::WR] .= $payload ;
+
+                        $Con->CLOSE_BY_WR = 1 ;
+
+                        break ;
+                    }
+                }else{
+                    break ;
+                }
+            }
+        }
+
+        function ProcNodeEventConClose(&$Con){
+            $Node = $this ;
+
+            fclose($Con->SOCK) ;
+            $Con->SOCK = FALSE ;
+
+            unset($Node->Cons[$Con->ConId]) ;
+
+            if(count($Node->Cons) === 0){
+                $NodeId = $Node->NodeId ;
+                unset($this->P->Nodes[$NodeId]) ;
             }
         }
 
         function ProcNodeEventCon(&$Con){
 
             if(feof($Con->SOCK)){
-                fclose($Con->SOCK) ;
-                $Con->SOCK = FALSE ;
-                unset($this->P->Nodes[$Con->NodeId]->Cons[$Con->ConId]) ;
+                $this->ProcNodeEventConClose($Con) ;
                 return ;
             }
 
             if(($Con->RW_FLAGS & self::WR) == self::WR){
-                $this->P->Logger->debug('書込可') ;
+                // $this->P->Logger->debug('書込可') ;
+
+                $len = strlen($Con->FIFO[self::WR]) ;
+
+                if(($rc = @fwrite($Con->SOCK,$Con->FIFO[self::WR],$len)) === FALSE){
+                    $this->P->Logger->debug('書込失敗') ;
+                    $this->ProcNodeEventConClose($Con) ;
+                    return ;
+
+                }else if($rc === $len){
+                    if($Con->CLOSE_BY_WR){
+                        // $this->P->Logger->debug('書込完了:CLOSE') ;
+                        $this->ProcNodeEventConClose($Con) ;
+                    }else{
+                        // $this->P->Logger->debug('書込完了') ;
+                        $Con->FIFO[self::WR] = '' ;
+                    }
+                }else{
+                    $this->P->Logger->debug('書込中') ;
+                    $Con->FIFO[self::WR] = substr($Con->FIFO[self::WR],$rc) ;
+                }
             }
 
             if(($Con->RW_FLAGS & self::RD) == self::RD){
                 switch($Con->Mode){
                 case self::ModeListen:
-                    $this->P->Logger->debug('受信可[%s]',$Con->Mode) ;
+                    // $this->P->Logger->debug('受信可[%s]',$Con->Mode) ;
                     $timeout = 0 ;
                     $peer_name = FALSE ;
                     if(($sock_new = stream_socket_accept($Con->SOCK,$timeout,$peer_name)) !== FALSE){
@@ -194,9 +291,19 @@
                     }
                     break ;
                 case self::ModeClient:
-                    $this->P->Logger->debug('読込可[%s]',$Con->Mode) ;
-                    $buf = fread($Con->SOCK,4096) ;
-                    $this->P->Logger->debug($buf) ;
+                    // $this->P->Logger->debug('読込可[%s]',$Con->Mode) ;
+
+                    if(($buf = fread($Con->SOCK,4096)) === FALSE){
+                        $this->P->Logger->debug('読込[%s][FALSE]',$Con->Mode) ;
+                    }else if($buf === ''){
+                        $this->P->Logger->debug('読込[%s][EAGAIN]',$Con->Mode) ;
+                    }else{
+                        if(property_exists($Con,self::FIFO) === FALSE){ $Con->FIFO = [] ; }
+                        if(! array_key_exists(self::RD,$Con->FIFO)){ $Con->FIFO[self::RD] = '' ; }
+                        $Con->FIFO[self::RD] .= $buf ;
+                        $this->P->Nodes[$Con->NodeId]->NodeEvRecvCon($Con) ;
+                    }
+
                     break ;
                 default:
                     $this->P->Logger->debug('ALERT') ;
@@ -217,7 +324,9 @@
             $NodeIds = array_keys($this->Nodes) ;
 
             foreach($NodeIds as $NodeId){
-                $this->ProcNodePoll($this->Nodes[$NodeId]) ;
+                if(array_key_exists($NodeId,$this->Nodes)){
+                    $this->ProcNodePoll($this->Nodes[$NodeId]) ;
+                }
             }
 
             if(! $this->RD_fds){ $this->RD_fds = NULL ; }
@@ -230,7 +339,9 @@
                 $rc = stream_select($this->RD_fds,$this->WR_fds,$this->EX_fds,$seconds,$microseconds) ;
                 if($rc > 0){
                     foreach($NodeIds as $NodeId){
-                        $this->ProcNodePollAfter($this->Nodes[$NodeId],$this->RD_fds,$this->WR_fds,$this->EX_fds) ;
+                        if(array_key_exists($NodeId,$this->Nodes)){
+                            $this->ProcNodePollAfter($this->Nodes[$NodeId],$this->RD_fds,$this->WR_fds,$this->EX_fds) ;
+                        }
                     }
                 }
             }else{
