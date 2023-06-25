@@ -31,7 +31,8 @@
             CLOSE_BY_WR     = 'CLOSE_BY_WR'     ,
             HTTP_VERSION    = 'HTTP_VERSION'    ,
             METHOD          = 'METHOD'          ,
-            REQUEST_URI     = 'REQUEST_URI'     ;
+            REQUEST_URI     = 'REQUEST_URI'     ,
+            QUERY_STRING    = 'QUERY_STRING'    ;
 
         function Setter($params){
             foreach($params as $k => $v){
@@ -266,8 +267,16 @@ retry:
 
                         }else if(preg_match('/^([^\s]+)\s+([^\s]+)\s+([^\s]+)$/',$line,$matches) === 1){
                             // $this->P->Logger->debug('[%s][%s][%s]',$matches[1],$matches[2],$matches[3]) ;
+
                             $Con->HTTP[self::METHOD]        = $matches[1] ;
-                            $Con->HTTP[self::REQUEST_URI]   = $matches[2] ;
+
+                            if(($pos = strpos($matches[2],'?')) !== FALSE){
+                                $Con->HTTP[self::REQUEST_URI]   = substr($matches[2],0,$pos) ;
+                                $Con->HTTP[self::QUERY_STRING]  = substr($matches[2],$pos+1) ;
+                            }else{
+                                $Con->HTTP[self::REQUEST_URI]   = $matches[2] ;
+                            }
+
                             $Con->HTTP[self::HTTP_VERSION]  = $matches[3] ;
                         }else if($line === ''){
                             if(
